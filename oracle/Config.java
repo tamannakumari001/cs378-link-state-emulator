@@ -1,4 +1,3 @@
-
 package oracle;
 
 import java.io.IOException;
@@ -102,6 +101,11 @@ public class Config {
   
 
     public static void main(String[] args) throws Exception{
+        if (args.length != 1) {
+            System.err.println("usage: Config <file>");
+            System.exit(1);
+        }
+
         try {
             System.out.println("Testing..");
             print(parse(Path.of(args[0])));
