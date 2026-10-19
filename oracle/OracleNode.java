@@ -20,23 +20,32 @@ public class OracleNode {
         byte[] ip;
         int port;
         boolean connected;
+        SocketChannel ch;
     } // stores info about a particular VN connected to the oracle
 
     static int nextIndex = 0;
+    static int N;
+    static int[][] cost;
+    static NodeState[] nodes = new NodeState[Protocol.MAX_NODES];
+    static boolean BroadcastDone = false;
+
+
 
     public static void main(String[] args) throws Exception {
         if (args.length != 1){
             System.err.println("usage: java -cp build oracle.OracleNode <config-file>");
             System.exit(1);
         }
-        int[][] cost = null;
+        cost = null;
         try{
             cost = Config.parse(Path.of(args[0]));
         } catch (Config.ConfigException e){
             System.err.println("Bad Config: " + e.getMessage());
             System.exit(1);
         }
-        System.out.println("Config OK " + cost.length + " Nodes");
+        N = cost.length;
+
+        System.out.println("Config OK " + N + " Nodes");
         Selector selector = Selector.open();
         ServerSocketChannel server = ServerSocketChannel.open();
         server.setOption(StandardSocketOptions.SO_REUSEADDR, true);
@@ -83,6 +92,8 @@ public class OracleNode {
         ch.configureBlocking(false);
         NodeState st = new NodeState();
         st.index = nextIndex++;
+        st.ch = ch;
+        nodes[st.index] =st;
         ch.register(selector, SelectionKey.OP_READ, st);
         System.out.println("accepted connection " + (char)('A' + st.index) + " from " + ch.getRemoteAddress());
     }
@@ -144,6 +155,12 @@ public class OracleNode {
         } catch (IOException e) {
            
         }
+        if (BroadcastDone){
+            sendLinkState(st);
+        }
+        else{
+            checkBroadcast();
+        }
         return true;
     }
 
@@ -152,5 +169,59 @@ public class OracleNode {
         key.cancel();
      
     }
+
+    static void checkBroadcast(){
+        for (int i =0  ; i < N ; i++) if (nodes[i] == null || !nodes[i].connected) return;
+        BroadcastDone = true;
+        System.out.println ("all " + N + "nodes connected. Sending LINK STATE ... ");
+        for (int i = 0; i< Protocol.MAX_NODES;i++){
+            if (nodes[i] != null && nodes[i].connected) sendLinkState(nodes[i]);
+        }
+        
+    }
+
+    static void putTuple(ByteBuffer out, NodeState n, int c){
+        out.put((byte)('A' + n.index));
+        out.put(n.ip);
+        out.putShort((short) n.port);
+        out.putInt(c);
+    }
+
+    static void sendLinkState(NodeState st){
+        int i = st.index;
+        int k = 1; 
+        if (i < N){
+            for (int j = 0 ; j < N ;j++){
+                if (j != i && cost[i][j] > 0 && nodes[j]!=null && nodes[j].connected)k++;
+            }
+        }
+
+        int bodyLen = Protocol.LS_COUNT_LEN + Protocol.LS_TUPLE_LEN*k;
+        ByteBuffer out = ByteBuffer.allocate(Protocol.HEADER_LEN + bodyLen);
+        out.put((byte) Protocol.TYPE_LINK_STATE);
+        out.putShort((short) bodyLen);
+        out.put((byte) k);
+        putTuple(out,st,0);
+
+        if (i < N){
+            for (int j = 0 ; j <N;j++){
+                if (j != i && cost[i][j] > 0 && nodes[j]!=null && nodes[j].connected){
+                    putTuple(out, nodes[j], cost[i][j]);
+                }
+            }
+        }
+        out.flip();
+        try{
+            while (out.hasRemaining()) st.ch.write(out);
+            System.out.println("snet LINK-STATE to " + (char)('A' + i) + " and " + k + " tuples");
+        } catch (IOException e){
+            System.out.println("could not send LINK-STATE to " + (char)('A' + i) + " " + e.getMessage());
+        }
+
+
+        
+    }
+
+    
 
 }
