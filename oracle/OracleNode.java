@@ -20,21 +20,21 @@ public class OracleNode {
         byte[] ip;
         int port;
         boolean connected;
-    }
+    } // stores info about a particular VN connected to the oracle
 
     static int nextIndex = 0;
 
     public static void main(String[] args) throws Exception {
         if (args.length != 1){
             System.err.println("usage: java -cp build oracle.OracleNode <config-file>");
-            return;
+            System.exit(1);
         }
-        int[][] cost;
+        int[][] cost = null;
         try{
             cost = Config.parse(Path.of(args[0]));
         } catch (Config.ConfigException e){
             System.err.println("Bad Config: " + e.getMessage());
-            return;
+            System.exit(1);
         }
         System.out.println("Config OK " + cost.length + " Nodes");
         Selector selector = Selector.open();
@@ -46,7 +46,7 @@ public class OracleNode {
         System.out.println("ON listening on port "  +Protocol.ON_PORT);
 
         while(true){
-            selector.select(1000);
+            selector.select(1000); // 1 second timeout
             Iterator<SelectionKey> it = selector.selectedKeys().iterator();
             while(it.hasNext()){
                 SelectionKey key = it.next();
@@ -63,7 +63,9 @@ public class OracleNode {
                 }
                 catch (IOException e){
                     System.out.println("connection error: " + e.getMessage());
-                    close(key);
+                    if (key.channel() != server) {
+                        close(key);
+                    }
                 }
             }
         }
@@ -82,7 +84,7 @@ public class OracleNode {
         NodeState st = new NodeState();
         st.index = nextIndex++;
         ch.register(selector, SelectionKey.OP_READ, st);
-        System.out.println("accepted connection " + (char)('A' + st.index) + "from " + ch.getRemoteAddress());
+        System.out.println("accepted connection " + (char)('A' + st.index) + " from " + ch.getRemoteAddress());
     }
 
     static void handleRead(SelectionKey key) throws IOException{
@@ -91,7 +93,7 @@ public class OracleNode {
 
         int n = ch.read(st.buf);
         if (n == -1){
-            System.out.println((char)('A' + st.index) + "disconnected");
+            System.out.println((char)('A' + st.index) + " disconnected");
             close(key);
             return;
         }
@@ -102,6 +104,12 @@ public class OracleNode {
             int type = Byte.toUnsignedInt(st.buf.get(st.buf.position()));
             int bodyLen = Short.toUnsignedInt(st.buf.getShort(st.buf.position() + 1));
 
+            if (type != Protocol.TYPE_CONNECT || bodyLen != Protocol.CONNECT_BODY_LEN) {
+                System.out.println("protocol error: type=" + type + " len=" + bodyLen);
+                close(key);
+                return;
+            }
+            
             if (st.buf.remaining() < Protocol.HEADER_LEN + bodyLen) {
                 break;
             }

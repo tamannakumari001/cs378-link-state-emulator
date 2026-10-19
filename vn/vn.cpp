@@ -25,6 +25,18 @@ static bool sendAll(int fd, const uint8_t *buf, int len){
     return true;
 }
 
+static void printNeighbourhood(const Tuple t[], int k) {
+    for (int i = 0; i < k; i++) {
+        if (t[i].cost == 0) std::printf("%c=0,", t[i].letter);
+    }
+
+    for (int i = 0; i < k; i++) {
+        if (t[i].cost != 0) {
+            std::printf("%c=%d,", t[i].letter, t[i].cost);
+        }
+    }
+    std::printf("\n");
+}
 
 int main(int argc, char *argv[]){
 
@@ -140,6 +152,9 @@ int main(int argc, char *argv[]){
 
     std::printf("Connected to ON %s:%d, sent CONNECT (%s:%d)\n", onIpStr, onPort, ownIPstr, udpPort);
 
+    uint8_t rbuf[2 * MAX_FRAME];
+    int fill = 0;
+
     // waiting on the TCP socket
     while (running) {
         fd_set rd;
@@ -157,17 +172,57 @@ int main(int argc, char *argv[]){
             break;
         }
 
+        // if (FD_ISSET(tcpFd, &rd)) {
+        //     uint8_t buf[512];
+        //     ssize_t n = recv(tcpFd, buf, sizeof(buf), 0);
+        //     if (n == 0){
+        //         std::printf("ON closed the connection\n");
+        //         break;
+        //     } else if (n < 0) {
+        //         perror("recv");
+        //         break;
+        //     }
+        //     std::printf("Received %zd bytes from ON\n", n);
+        // }
         if (FD_ISSET(tcpFd, &rd)) {
-            uint8_t buf[512];
-            ssize_t n = recv(tcpFd, buf, sizeof(buf), 0);
-            if (n == 0){
+            ssize_t n = recv(tcpFd, rbuf + fill, sizeof(rbuf) - fill, 0);
+            if (n == 0) {
                 std::printf("ON closed the connection\n");
                 break;
             } else if (n < 0) {
                 perror("recv");
                 break;
             }
-            std::printf("Received %zd bytes from ON\n", n);
+            fill += (int)n;
+
+            bool bad = false;
+            while (fill >= HDR_LEN) {
+                uint8_t type = rbuf[0];
+                int bodyLen = get16(rbuf + 1);
+
+                // checking header as soon as it arrives because if corrupted then cooked if we don't check
+                if (type != MSG_LINK_STATE || bodyLen > MAX_FRAME - HDR_LEN) {
+                    std::cerr << "protocol error: type = " << type << ", len = " << bodyLen << std::endl;
+                    bad = true;
+                    break;
+                }
+
+                int frameLen = HDR_LEN + bodyLen;
+                if (fill < frameLen) break;
+
+                Tuple tuples[MAX_NODES];
+                int k = parseLinkState(rbuf + HDR_LEN, bodyLen, tuples);
+                if (k < 0) {
+                    std::cerr << "wrong LINK-STATE packet\n";
+                    bad = true;
+                    break;
+                }
+                printNeighbourhood(tuples, k);
+
+                std::memmove(rbuf, rbuf + frameLen, fill - frameLen);
+                fill -= frameLen;
+            }
+            if (bad) break;
         }
     }
 
