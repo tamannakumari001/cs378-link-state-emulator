@@ -14,6 +14,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/select.h>
+#include <ctime>
 
 const uint16_t ON_PORT = 5000;
 const uint8_t MSG_CONNECT = 1;

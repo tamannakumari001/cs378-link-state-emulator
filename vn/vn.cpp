@@ -1,5 +1,6 @@
 #include "protocol.h"
 
+static const bool VERBOSE_DROPS = false;
 static volatile sig_atomic_t running = 1;
 static void onSigint(int) {
     running = 0;
@@ -71,12 +72,6 @@ static void applyLinkState(const Tuple t[], int k, int &myId, Nbr nbr[]) {
     }
 }
 
-static void debugPrintNbr(Nbr nbr[]){
-    for (int i = 0; i < MAX_NODES; i++) {
-        if (nbr[i].present)
-            std::printf("yayy this neighbour state info received with letter %c and cost %d\n", (char)(i + 'A'), nbr[i].cost);
-    }
-}
 
 static void sendToNbr(int udpFd, const Nbr& n, const uint8_t *pkt, int len) {
     sockaddr_in dst;
@@ -136,7 +131,8 @@ static void handleLsp(int udpFd, int myId, const Nbr nbr[], LsEntry lsp[], uint8
     }
 
     if (lsp[origin].valid && seq <= lsp[origin].seq) {
-        std::printf("dropped duplicate/old LSP origin=%c seq=%u\n", pkt[1], (unsigned)seq);
+        if (VERBOSE_DROPS)
+            std::printf("dropped duplicate/old LSP origin=%c seq=%u\n", pkt[1], (unsigned)seq);
         return;
     }
 
@@ -157,6 +153,60 @@ static void handleLsp(int udpFd, int myId, const Nbr nbr[], LsEntry lsp[], uint8
         if(!nbr[i].present || i == sender || i == origin) continue;
         sendToNbr(udpFd, nbr[i], pkt, len);
         std::printf("  forwarded to %c\n", (char)('A' + i));
+    }
+}
+
+static double t0 = 0.0;
+static const double LSP_PERIOD = 10.0; // time (in seconds) to wait before sending LSP again
+static const double PRINT_PERIOD = 10.0; // time (in seconds) to wait before printing graph
+
+static double nowSec() {
+    timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+// print what this node knows about the whole network
+static void printGraph(int myId, const Nbr nbr[], const LsEntry lsp[]) {
+    if (myId < 0) return;
+
+    int cost[MAX_NODES][MAX_NODES];
+    for (int i = 0; i < MAX_NODES; i++) {
+        for (int j = 0; j < MAX_NODES; j++) {
+            cost[i][j] = -1;
+        }
+    }
+
+    int maxId = myId;
+
+    // neighbour links
+    for (int v = 0; v < MAX_NODES; v++) {
+        if (!nbr[v].present) continue;
+        cost[myId][v] = (int)nbr[v].cost;
+        if (v > maxId) maxId = v;
+    }
+
+    // all other links
+    for (int u = 0; u < MAX_NODES; u++) {
+        if (!lsp[u].valid) continue;
+        if (u > maxId) maxId = u;
+        for (int i = 0; i < lsp[u].count; i++) {
+            int v = lsp[u].ids[i] - 'A';
+            cost[u][v] = (int)lsp[u].costs[i];
+            if (v > maxId) maxId = v;
+        }
+    }
+
+    int n = maxId + 1;
+    std::printf("-- Graph at node %c, t=%.0fs --\n", 'A' + myId, nowSec() - t0);
+    for (int i = 0; i < n - 1; i++) {
+        for (int k = 0; k < i; k++) std::printf("\t");
+        for (int j = i + 1; j < n; j++) {
+            int c = (cost[i][j] != -1) ? cost[i][j] : cost[j][i];
+            std::printf("%d", c);
+            if (j < n - 1) std::printf("\t");
+        }
+        std::printf("\n");
     }
 }
 
@@ -284,7 +334,10 @@ int main(int argc, char *argv[]){
     std::memset(nbr, 0, sizeof(nbr));
     std::memset(lsp, 0, sizeof(lsp));
 
-    // waiting on the TCP socket
+    t0 = nowSec();
+    double nextLsp = nowSec() + LSP_PERIOD;
+    double nextPrint = nowSec() + PRINT_PERIOD;
+    // waiting on both sockets with 'select' syscall
     while (running) {
         fd_set rd;
         FD_ZERO(&rd);
@@ -339,7 +392,6 @@ int main(int argc, char *argv[]){
                 }
                 printNeighbourhood(tuples, k);
                 applyLinkState(tuples, k, myId, nbr);
-                // debugPrintNbr(nbr);
                 originateLsp(udpFd, myId, mySeq, nbr);
 
                 std::memmove(rbuf, rbuf + frameLen, fill - frameLen);
@@ -356,6 +408,16 @@ int main(int argc, char *argv[]){
             } else {
                 handleLsp(udpFd, myId, nbr, lsp, pkt, (int)n);
             }
+        }
+
+        double t = nowSec();
+        if (t >= nextLsp) {
+            originateLsp(udpFd, myId, mySeq, nbr);
+            nextLsp = t + LSP_PERIOD;
+        }
+        if (t >= nextPrint) {
+            printGraph(myId, nbr, lsp);
+            nextPrint = t + PRINT_PERIOD;
         }
     }
 

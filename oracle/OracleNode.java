@@ -11,6 +11,9 @@ import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.nio.file.Path;
 import java.util.Iterator;
+import java.nio.file.Files;
+import java.nio.file.attribute.FileTime;
+import java.util.Arrays;
 
 public class OracleNode {
     
@@ -28,17 +31,69 @@ public class OracleNode {
     static int[][] cost;
     static NodeState[] nodes = new NodeState[Protocol.MAX_NODES];
     static boolean BroadcastDone = false;
+    static Path configPath;
+    static FileTime lastMod;
+    static long lastSize;
 
+    static void checkBroadcast(){
+        for (int i =0  ; i < N ; i++) if (nodes[i] == null || !nodes[i].connected) return;
+        BroadcastDone = true;
+        System.out.println ("all " + N + " nodes connected. Sending LINK STATE ... ");
+        for (int i = 0; i< Protocol.MAX_NODES;i++){
+            if (nodes[i] != null && nodes[i].connected) sendLinkState(nodes[i]);
+        }
+        
+    }
 
+    static void checkConfig() {
+        try {
+            FileTime mod = Files.getLastModifiedTime(configPath);
+            long size = Files.size(configPath);
+            if (mod.equals(lastMod) && size == lastSize) return;
+            lastMod = mod;
+            lastSize = size;
+
+            int[][] newCost = Config.parse(configPath);
+            if (newCost.length != N) {
+                System.out.println("config changed the number of nodes (" + newCost.length + " != " + N + "). ignoring change");
+                return;
+            }
+
+            if (Arrays.deepEquals(newCost, cost)) return; // saved without changing anything
+
+            for (int i = 0; i < N; i++) {
+                for (int j = i; j < N; j++) {
+                    if (newCost[i][j] != cost[i][j]) {
+                        System.out.println("link " + (char)('A' + i) + "-" + (char)('A' + j) + ": " + cost[i][j] + " -> " + newCost[i][j]);
+                    }
+                }
+            }
+
+            cost = newCost;
+            BroadcastDone = false;
+            checkBroadcast();
+            if (!BroadcastDone) {
+                System.out.println("not all nodes connected. connect all VNs");
+            }
+
+        } catch (Config.ConfigException e) {
+            System.out.println("Config reload failed: " + e.getMessage());
+        } catch (IOException e) {
+            System.out.println("could not read config: " + e.getMessage());
+        }
+    }
 
     public static void main(String[] args) throws Exception {
         if (args.length != 1){
             System.err.println("usage: java -cp build oracle.OracleNode <config-file>");
             System.exit(1);
         }
+        configPath = Path.of(args[0]);
         cost = null;
         try{
-            cost = Config.parse(Path.of(args[0]));
+            cost = Config.parse(configPath);
+            lastMod = Files.getLastModifiedTime(configPath);
+            lastSize = Files.size(configPath);
         } catch (Config.ConfigException e){
             System.err.println("Bad Config: " + e.getMessage());
             System.exit(1);
@@ -77,6 +132,8 @@ public class OracleNode {
                     }
                 }
             }
+
+            checkConfig();
         }
 
     }
@@ -105,6 +162,7 @@ public class OracleNode {
         int n = ch.read(st.buf);
         if (n == -1){
             System.out.println((char)('A' + st.index) + " disconnected");
+            nodes[st.index] = null;
             close(key);
             return;
         }
@@ -170,15 +228,7 @@ public class OracleNode {
      
     }
 
-    static void checkBroadcast(){
-        for (int i =0  ; i < N ; i++) if (nodes[i] == null || !nodes[i].connected) return;
-        BroadcastDone = true;
-        System.out.println ("all " + N + "nodes connected. Sending LINK STATE ... ");
-        for (int i = 0; i< Protocol.MAX_NODES;i++){
-            if (nodes[i] != null && nodes[i].connected) sendLinkState(nodes[i]);
-        }
-        
-    }
+    
 
     static void putTuple(ByteBuffer out, NodeState n, int c){
         out.put((byte)('A' + n.index));
@@ -213,7 +263,7 @@ public class OracleNode {
         out.flip();
         try{
             while (out.hasRemaining()) st.ch.write(out);
-            System.out.println("snet LINK-STATE to " + (char)('A' + i) + " and " + k + " tuples");
+            System.out.println("sent LINK-STATE to " + (char)('A' + i) + " and " + k + " tuples");
         } catch (IOException e){
             System.out.println("could not send LINK-STATE to " + (char)('A' + i) + " " + e.getMessage());
         }
