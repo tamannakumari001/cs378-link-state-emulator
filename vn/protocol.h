@@ -25,6 +25,12 @@ const int TUPLE_LEN = 11; // letter (1) + ip (4) + port (2) + cost (4)
 const int MAX_NODES = 26;
 const int MAX_FRAME = HDR_LEN + 1 + TUPLE_LEN * MAX_NODES; // 290 bytes
 
+const uint8_t MSG_LSP = 3;
+const int LSP_HDR_LEN = 8;
+const int LSP_ENTRY_LEN = 5;
+const int MAX_LSP = LSP_HDR_LEN + MAX_NODES * LSP_ENTRY_LEN;
+const int LSP_REPEAT = 2; // number of times to repeat each packet cuz UDP is bad :(
+
 struct Tuple {
     char letter;
     uint8_t ip[4];
@@ -36,6 +42,11 @@ struct Tuple {
 inline void put16(uint8_t *p, uint16_t v) {
     v = htons(v);
     std::memcpy(p, &v, 2);
+}
+
+inline void put32(uint8_t *p, uint32_t v){
+    v = htonl(v);
+    std::memcpy(p, &v, 4);
 }
 
 inline uint16_t get16(const uint8_t *p) {
@@ -74,6 +85,33 @@ inline int parseLinkState(const uint8_t *body, int bodyLen, Tuple out[MAX_NODES]
         if (out[i].cost == 0) selfCount++;
     }
     return (selfCount == 1) ? k : -1;
+}
+
+inline int buildLsp(uint8_t *buf, uint8_t origin, uint8_t sender, uint32_t seq, const uint8_t *ids, const uint32_t *costs, int k){
+    buf[0] = MSG_LSP;
+    buf[1] = origin;
+    buf[2] = sender;
+    put32(buf + 3, seq);
+    buf[7] = (uint8_t)k;
+    for (int i = 0; i < k; i++) {
+        buf[8 + i * LSP_ENTRY_LEN] = ids[i];
+        put32(buf + 9 + i * LSP_ENTRY_LEN, costs[i]);
+    }
+
+    return LSP_HDR_LEN + k * LSP_ENTRY_LEN;
+}
+
+inline int checkLsp(const uint8_t *d, int len) {
+    if (len < LSP_HDR_LEN || d[0] != MSG_LSP) return -1;
+    if (d[1] < 'A' || d[1] > 'Z' || d[2] < 'A' || d[2] > 'Z') return -1;
+    int k = d[7];
+    if (k > MAX_NODES || len != LSP_HDR_LEN + k * LSP_ENTRY_LEN) return -1;
+    for (int i = 0; i < k; i++) {
+        const uint8_t *e = d + LSP_HDR_LEN + i * LSP_ENTRY_LEN;
+        if (e[0] < 'A' || e[0] > 'Z') return -1;
+        if (get32(e + 1) == 0) return -1;
+    }
+    return k;
 }
 
 #endif

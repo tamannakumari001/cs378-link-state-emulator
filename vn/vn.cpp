@@ -38,6 +38,129 @@ static void printNeighbourhood(const Tuple t[], int k) {
     std::printf("\n");
 }
 
+struct Nbr {
+    bool present;
+    uint8_t ip[4];
+    uint16_t port;
+    uint32_t cost;
+};
+
+struct LsEntry {
+    bool valid;
+    uint32_t seq;
+    int count;
+    uint8_t ids[MAX_NODES];
+    uint32_t costs[MAX_NODES];
+};
+
+static void applyLinkState(const Tuple t[], int k, int &myId, Nbr nbr[]) {
+    std::memset(nbr, 0, sizeof(Nbr) * MAX_NODES);
+    for (int i = 0; i < k; i++) {
+        int id = t[i].letter - 'A';
+        if (t[i].cost == 0) {
+            if (myId != -1 && myId != id) {
+                std::cerr << "warning: my letter changed from " << (char)('A' + myId) << " to " << t[i].letter << std::endl;
+            }
+            myId = id;
+        } else {
+            nbr[id].present = true;
+            std::memcpy(nbr[id].ip, t[i].ip, 4);
+            nbr[id].port = t[i].port;
+            nbr[id].cost = t[i].cost;
+        }
+    }
+}
+
+static void debugPrintNbr(Nbr nbr[]){
+    for (int i = 0; i < MAX_NODES; i++) {
+        if (nbr[i].present)
+            std::printf("yayy this neighbour state info received with letter %c and cost %d\n", (char)(i + 'A'), nbr[i].cost);
+    }
+}
+
+static void sendToNbr(int udpFd, const Nbr& n, const uint8_t *pkt, int len) {
+    sockaddr_in dst;
+    std::memset(&dst, 0, sizeof(dst));
+    dst.sin_family = AF_INET;
+    dst.sin_port = htons(n.port);
+    std::memcpy(&dst.sin_addr, n.ip, 4);
+    
+    for (int r = 0; r < LSP_REPEAT; r++) {
+        if (sendto(udpFd, pkt, len, 0, (sockaddr *)&dst, sizeof(dst)) < 0){
+            perror("sendto LSP");
+        }
+    }
+}
+
+static void originateLsp(int udpFd, int myId, uint32_t &mySeq, const Nbr nbr[]) {
+    if (myId < 0) return;
+    
+    uint8_t ids[MAX_NODES];
+    uint32_t costs[MAX_NODES];
+    int k = 0;
+    for (int i = 0; i < MAX_NODES; i++) {
+        if (nbr[i].present) {
+            ids[k] = (uint8_t)('A' + i);
+            costs[k] = nbr[i].cost;
+            k++;
+        }
+    }
+
+    mySeq++;
+    uint8_t pkt[MAX_LSP];
+    uint8_t me = (uint8_t)('A' + myId);
+    int len = buildLsp(pkt, me, me, mySeq, ids, costs, k);
+
+    for (int i = 0; i < MAX_NODES; i++) {
+        if (nbr[i].present) sendToNbr(udpFd, nbr[i], pkt, len);
+    }
+    std::printf("sent LSP seq=%u (%d links)\n", (unsigned)mySeq, k);
+}
+
+static void handleLsp(int udpFd, int myId, const Nbr nbr[], LsEntry lsp[], uint8_t *pkt, int len) {
+    if (myId < 0) return;
+
+    int k = checkLsp(pkt, len);
+    if (k < 0) {
+        std::printf("dropped malformed LSP (%d bytes)\n", len);
+        return;
+    }
+
+    int origin = pkt[1] - 'A';
+    int sender = pkt[2] - 'A';
+    uint32_t seq = get32(pkt + 3);
+
+    if (origin == myId){
+        std::printf("ignoring my own LSP\n");
+        return;
+    }
+
+    if (lsp[origin].valid && seq <= lsp[origin].seq) {
+        std::printf("dropped duplicate/old LSP origin=%c seq=%u\n", pkt[1], (unsigned)seq);
+        return;
+    }
+
+    // newer (higher seq number) so we store it and update the node's graph
+    lsp[origin].valid = true;
+    lsp[origin].seq = seq;
+    lsp[origin].count = k;
+    for (int i = 0; i < k; i++) {
+        const uint8_t *e = pkt + LSP_HDR_LEN + i * LSP_ENTRY_LEN;
+        lsp[origin].ids[i] = e[0];
+        lsp[origin].costs[i] = get32(e+1);
+    }
+    std::printf("stored LSP origin=%c seq=%u (from %c)\n", pkt[1], (unsigned)seq, pkt[2]);
+
+    // now forward it to everyone except sender and origin
+    pkt[2] = (uint8_t)('A' + myId);
+    for (int i = 0; i < MAX_NODES; i++) {
+        if(!nbr[i].present || i == sender || i == origin) continue;
+        sendToNbr(udpFd, nbr[i], pkt, len);
+        std::printf("  forwarded to %c\n", (char)('A' + i));
+    }
+}
+
+
 int main(int argc, char *argv[]){
 
     if (argc < 3 || argc > 4){
@@ -154,36 +277,33 @@ int main(int argc, char *argv[]){
 
     uint8_t rbuf[2 * MAX_FRAME];
     int fill = 0;
+    int myId = -1;
+    uint32_t mySeq = 0;
+    Nbr nbr[MAX_NODES]; // stores the neighbour info
+    LsEntry lsp[MAX_NODES]; // stores LSPs from each of the origins
+    std::memset(nbr, 0, sizeof(nbr));
+    std::memset(lsp, 0, sizeof(lsp));
 
     // waiting on the TCP socket
     while (running) {
         fd_set rd;
         FD_ZERO(&rd);
         FD_SET(tcpFd, &rd);
+        FD_SET(udpFd, &rd);
 
         timeval tv;
         tv.tv_sec = 1;
         tv.tv_usec = 0;
 
-        int r = select(tcpFd + 1, &rd, NULL, NULL, &tv);
+        int maxFd = (tcpFd > udpFd) ? tcpFd : udpFd;
+        int r = select(maxFd + 1, &rd, NULL, NULL, &tv);
         if (r < 0) {
             if (errno == EINTR) continue;
             perror("select");
             break;
         }
 
-        // if (FD_ISSET(tcpFd, &rd)) {
-        //     uint8_t buf[512];
-        //     ssize_t n = recv(tcpFd, buf, sizeof(buf), 0);
-        //     if (n == 0){
-        //         std::printf("ON closed the connection\n");
-        //         break;
-        //     } else if (n < 0) {
-        //         perror("recv");
-        //         break;
-        //     }
-        //     std::printf("Received %zd bytes from ON\n", n);
-        // }
+    
         if (FD_ISSET(tcpFd, &rd)) {
             ssize_t n = recv(tcpFd, rbuf + fill, sizeof(rbuf) - fill, 0);
             if (n == 0) {
@@ -218,11 +338,24 @@ int main(int argc, char *argv[]){
                     break;
                 }
                 printNeighbourhood(tuples, k);
+                applyLinkState(tuples, k, myId, nbr);
+                // debugPrintNbr(nbr);
+                originateLsp(udpFd, myId, mySeq, nbr);
 
                 std::memmove(rbuf, rbuf + frameLen, fill - frameLen);
                 fill -= frameLen;
             }
             if (bad) break;
+        }
+
+        if (FD_ISSET(udpFd, &rd)) {
+            uint8_t pkt[2048];
+            ssize_t n = recvfrom(udpFd, pkt, sizeof(pkt), 0, NULL, NULL);
+            if (n < 0) {
+                perror("recvfrom");
+            } else {
+                handleLsp(udpFd, myId, nbr, lsp, pkt, (int)n);
+            }
         }
     }
 
