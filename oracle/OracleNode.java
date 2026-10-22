@@ -162,7 +162,6 @@ public class OracleNode {
         int n = ch.read(st.buf);
         if (n == -1){
             System.out.println((char)('A' + st.index) + " disconnected");
-            nodes[st.index] = null;
             close(key);
             return;
         }
@@ -223,7 +222,15 @@ public class OracleNode {
     }
 
      static void close(SelectionKey key) {
-        try { key.channel().close(); } catch (IOException ignored) {}
+        // forgetting the VN
+        Object att = key.attachment();
+        if (att instanceof NodeState) {
+            NodeState st = (NodeState) att;
+            if (nodes[st.index] == st) nodes[st.index] = null;
+        }
+        try { 
+            key.channel().close();
+        } catch (IOException ignored) {}
         key.cancel();
      
     }

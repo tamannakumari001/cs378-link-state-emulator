@@ -1,6 +1,6 @@
 #include "protocol.h"
 
-static const bool VERBOSE_DROPS = false;
+static const bool VERBOSE = false;
 static volatile sig_atomic_t running = 1;
 static void onSigint(int) {
     running = 0;
@@ -37,6 +37,16 @@ static void printNeighbourhood(const Tuple t[], int k) {
         }
     }
     std::printf("\n");
+}
+
+static double t0 = 0.0;
+static const double LSP_PERIOD = 10.0; // time (in seconds) to wait before sending LSP again
+static const double PRINT_PERIOD = 10.0; // time (in seconds) to wait before printing graph
+
+static double nowSec() {
+    timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + ts.tv_nsec / 1e9;
 }
 
 struct Nbr {
@@ -109,7 +119,8 @@ static void originateLsp(int udpFd, int myId, uint32_t &mySeq, const Nbr nbr[]) 
     for (int i = 0; i < MAX_NODES; i++) {
         if (nbr[i].present) sendToNbr(udpFd, nbr[i], pkt, len);
     }
-    std::printf("sent LSP seq=%u (%d links)\n", (unsigned)mySeq, k);
+    if (VERBOSE)
+        std::printf("sent LSP seq=%u (%d links)\n", (unsigned)mySeq, k);
 }
 
 static void handleLsp(int udpFd, int myId, const Nbr nbr[], LsEntry lsp[], uint8_t *pkt, int len) {
@@ -126,12 +137,13 @@ static void handleLsp(int udpFd, int myId, const Nbr nbr[], LsEntry lsp[], uint8
     uint32_t seq = get32(pkt + 3);
 
     if (origin == myId){
-        std::printf("ignoring my own LSP\n");
+        if (VERBOSE)
+            std::printf("ignoring my own LSP\n");
         return;
     }
 
     if (lsp[origin].valid && seq <= lsp[origin].seq) {
-        if (VERBOSE_DROPS)
+        if (VERBOSE)
             std::printf("dropped duplicate/old LSP origin=%c seq=%u\n", pkt[1], (unsigned)seq);
         return;
     }
@@ -145,26 +157,19 @@ static void handleLsp(int udpFd, int myId, const Nbr nbr[], LsEntry lsp[], uint8
         lsp[origin].ids[i] = e[0];
         lsp[origin].costs[i] = get32(e+1);
     }
-    std::printf("stored LSP origin=%c seq=%u (from %c)\n", pkt[1], (unsigned)seq, pkt[2]);
+    if (VERBOSE)
+        std::printf("stored LSP origin=%c seq=%u (from %c)\n", pkt[1], (unsigned)seq, pkt[2]);
 
     // now forward it to everyone except sender and origin
     pkt[2] = (uint8_t)('A' + myId);
     for (int i = 0; i < MAX_NODES; i++) {
         if(!nbr[i].present || i == sender || i == origin) continue;
         sendToNbr(udpFd, nbr[i], pkt, len);
-        std::printf("  forwarded to %c\n", (char)('A' + i));
+        if (VERBOSE)
+            std::printf("  forwarded to %c\n", (char)('A' + i));
     }
 }
 
-static double t0 = 0.0;
-static const double LSP_PERIOD = 10.0; // time (in seconds) to wait before sending LSP again
-static const double PRINT_PERIOD = 10.0; // time (in seconds) to wait before printing graph
-
-static double nowSec() {
-    timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec + ts.tv_nsec / 1e9;
-}
 
 // print what this node knows about the whole network
 static void printGraph(int myId, const Nbr nbr[], const LsEntry lsp[]) {
@@ -231,7 +236,7 @@ int main(int argc, char *argv[]){
         *colon = '\0';
         onPort = parsePort(colon + 1);
         if (onPort < 0){
-            std::cerr << "ON port given is invalid " << *(colon + 1) << std::endl;
+            std::cerr << "ON port given is invalid " << colon + 1 << std::endl;
             return 1;
         }
     }
@@ -375,7 +380,7 @@ int main(int argc, char *argv[]){
 
                 // checking header as soon as it arrives because if corrupted then cooked if we don't check
                 if (type != MSG_LINK_STATE || bodyLen > MAX_FRAME - HDR_LEN) {
-                    std::cerr << "protocol error: type = " << type << ", len = " << bodyLen << std::endl;
+                    std::cerr << "protocol error: type = " << (int)type << ", len = " << bodyLen << std::endl;
                     bad = true;
                     break;
                 }
@@ -421,7 +426,7 @@ int main(int argc, char *argv[]){
         }
     }
 
-    std::printf("i'm dying bai bai\n");
+    std::printf("I'm going offline. Goodbye.\n");
     close(tcpFd);
     close(udpFd);
     return 0;
