@@ -142,7 +142,7 @@ public class OracleNode {
         SocketChannel ch = server.accept();
         if (ch == null) return;
         if (nextIndex >= Protocol.MAX_NODES){
-            System.out.println("too many connections");
+            System.out.println("too many connections. ignoring island nodes");
             ch.close(); return;
         }
 
